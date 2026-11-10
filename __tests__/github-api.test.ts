@@ -1,354 +1,225 @@
-import { GitHubApiClient, GitHubApiError } from '../src/lib/api/github';
+import { GitHubApiClient, GitHubApiError, isValidGitHubName } from '../src/lib/api/github';
 
-// Mock fetch globally
 const mockFetch = jest.fn();
-global.fetch = mockFetch as jest.MockedFunction<typeof fetch>;
+global.fetch = mockFetch as unknown as typeof fetch;
+
+function response(
+  body: unknown,
+  init: { status?: number; headers?: Record<string, string> } = {}
+) {
+  const headers = new Headers(init.headers);
+  const status = init.status ?? 200;
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    headers,
+    json: jest.fn().mockResolvedValue(body),
+  } as unknown as Response;
+}
 
 describe('GitHubApiClient', () => {
-  let client: GitHubApiClient;
-  const mockToken = 'test-token';
+  const token = 'ghp_test_token_value_1234567890';
 
   beforeEach(() => {
-    client = new GitHubApiClient(mockToken);
-    mockFetch.mockClear();
+    mockFetch.mockReset();
   });
 
-  describe('constructor', () => {
-    it('should initialize with a token', () => {
-      expect(client).toBeInstanceOf(GitHubApiClient);
+  it('rejects an empty token', () => {
+    expect(() => new GitHubApiClient('')).toThrow(GitHubApiError);
+  });
+
+  it('sends bearer auth, API version and JSON accept headers', async () => {
+    mockFetch.mockResolvedValueOnce(response({ login: 'octocat' }));
+
+    const client = new GitHubApiClient(token);
+    await client.validateToken();
+
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    const [url, init] = mockFetch.mock.calls[0];
+    expect(url).toBe('https://api.github.com/user');
+    expect(init.headers).toMatchObject({
+      Accept: 'application/vnd.github+json',
+      Authorization: `Bearer ${token}`,
+      'X-GitHub-Api-Version': '2022-11-28',
+    });
+    expect(init.redirect).toBe('error');
+  });
+
+  it('surfaces the GitHub error message and status', async () => {
+    mockFetch.mockResolvedValueOnce(
+      response({ message: 'Bad credentials' }, { status: 401 })
+    );
+
+    const client = new GitHubApiClient(token);
+    await expect(client.validateToken()).rejects.toMatchObject({
+      name: 'GitHubApiError',
+      status: 401,
+      message: 'Bad credentials',
     });
   });
 
-  describe('validateToken', () => {
-    it('should make a request to /user endpoint', async () => {
-      const mockUser = {
-        login: 'testuser',
-        id: 12345,
-        avatar_url: 'https://github.com/images/error/testuser_happy.gif',
-        name: 'Test User',
-        email: 'test@example.com',
-        public_repos: 10,
-        public_gists: 5,
-        followers: 100,
-        following: 50,
-        created_at: '2023-01-01T00:00:00Z'
-      };
-
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        json: jest.fn().mockResolvedValueOnce(mockUser),
-        headers: new Headers({
-          'X-RateLimit-Limit': '5000',
-          'X-RateLimit-Remaining': '4999',
-          'X-RateLimit-Reset': '1234567890'
-        })
-      } as any);
-
-      const result = await client.validateToken();
-
-      expect(mockFetch).toHaveBeenCalledWith(
-        'https://api.github.com/user',
-        expect.objectContaining({
-          headers: expect.objectContaining({
-            'Accept': 'application/vnd.github+json',
-            'Authorization': 'Bearer test-token',
-            'X-GitHub-Api-Version': '2022-11-28'
-          })
-        })
-      );
-      
-      expect(result).toEqual(mockUser);
-    });
-
-    it('should throw GitHubApiError on failed request', async () => {
-      const errorResponse = {
-        message: 'Bad credentials',
-        documentation_url: 'https://docs.github.com/rest'
-      };
-
-      mockFetch.mockResolvedValueOnce({
-        ok: false,
-        status: 401,
-        json: jest.fn().mockResolvedValueOnce(errorResponse),
-        headers: new Headers()
-      } as any);
-
-      await expect(client.validateToken()).rejects.toThrow(GitHubApiError);
-      await expect(client.validateToken()).rejects.toThrow('Bad credentials');
-    });
-  });
-
-  describe('getRepositories', () => {
-    it('should fetch user repositories by default', async () => {
-      const mockRepos = [
+  it('explains rate-limit 403 responses', async () => {
+    mockFetch.mockResolvedValueOnce(
+      response(
+        { message: 'API rate limit exceeded' },
         {
-          id: 1,
-          name: 'test-repo',
-          full_name: 'testuser/test-repo',
-          owner: { login: 'testuser', avatar_url: 'https://github.com/testuser.png' },
-          private: false,
-          html_url: 'https://github.com/testuser/test-repo',
-          description: 'A test repository',
-          created_at: '2023-01-01T00:00:00Z',
-          updated_at: '2023-01-02T00:00:00Z',
-          pushed_at: '2023-01-02T12:00:00Z',
-          default_branch: 'main'
-        }
-      ];
-
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        json: jest.fn().mockResolvedValueOnce(mockRepos),
-        headers: new Headers()
-      } as any);
-
-      const result = await client.getRepositories('testuser', true);
-
-      expect(mockFetch).toHaveBeenCalledWith(
-        'https://api.github.com/user/repos?',
-        expect.any(Object)
-      );
-      
-      expect(result).toEqual(mockRepos);
-    });
-
-    it('should fetch organization repositories when owner is specified', async () => {
-      const mockRepos = [];
-      
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        json: jest.fn().mockResolvedValueOnce(mockRepos),
-        headers: new Headers()
-      } as any);
-
-      await client.getRepositories('test-org', false);
-
-      expect(mockFetch).toHaveBeenCalledWith(
-        'https://api.github.com/orgs/test-org/repos?',
-        expect.any(Object)
-      );
-    });
-
-    it('should include query parameters when options are provided', async () => {
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        json: jest.fn().mockResolvedValueOnce([]),
-        headers: new Headers()
-      } as any);
-
-      await client.getRepositories('test-org', false, {
-        type: 'owner',
-        sort: 'updated',
-        direction: 'desc',
-        per_page: 50,
-        page: 1
-      });
-
-      expect(mockFetch).toHaveBeenCalledWith(
-        'https://api.github.com/orgs/test-org/repos?type=owner&sort=updated&direction=desc&per_page=50&page=1',
-        expect.any(Object)
-      );
-    });
-  });
-
-  describe('getWorkflows', () => {
-    it('should fetch workflows for a repository', async () => {
-      const mockWorkflows = [
-        {
-          id: 1,
-          name: 'CI',
-          path: '.github/workflows/ci.yml',
-          state: 'active' as const,
-          created_at: '2023-01-01T00:00:00Z',
-          updated_at: '2023-01-02T00:00:00Z',
-          url: 'https://api.github.com/repos/testuser/test-repo/actions/workflows/1',
-          html_url: 'https://github.com/testuser/test-repo/actions/workflows/ci.yml',
-          badge_url: 'https://github.com/testuser/test-repo/workflows/CI/badge.svg'
-        }
-      ];
-
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        json: jest.fn().mockResolvedValueOnce({ workflows: mockWorkflows }),
-        headers: new Headers()
-      } as any);
-
-      const result = await client.getWorkflows('testuser', 'test-repo');
-
-      expect(mockFetch).toHaveBeenCalledWith(
-        'https://api.github.com/repos/testuser/test-repo/actions/workflows',
-        expect.any(Object)
-      );
-      
-      expect(result).toEqual(mockWorkflows);
-    });
-  });
-
-  describe('getWorkflowRuns', () => {
-    it('should fetch workflow runs for a repository', async () => {
-      const mockRuns = [
-        {
-          id: 1,
-          name: 'CI',
-          head_branch: 'main',
-          head_sha: 'abc123',
-          path: '.github/workflows/ci.yml',
-          display_title: 'Update README',
-          run_number: 1,
-          event: 'push',
-          status: 'completed' as const,
-          conclusion: 'success' as const,
-          workflow_id: 1,
-          url: 'https://api.github.com/repos/testuser/test-repo/actions/runs/1',
-          html_url: 'https://github.com/testuser/test-repo/actions/runs/1',
-          created_at: '2023-01-01T00:00:00Z',
-          updated_at: '2023-01-01T01:00:00Z',
-          actor: {
-            login: 'testuser',
-            avatar_url: 'https://github.com/testuser.png'
+          status: 403,
+          headers: {
+            'X-RateLimit-Remaining': '0',
+            'X-RateLimit-Reset': '1700000000',
           },
-          run_attempt: 1,
-          repository: {
-            id: 1,
-            name: 'test-repo',
-            full_name: 'testuser/test-repo',
-            owner: { login: 'testuser' }
+        }
+      )
+    );
+
+    const client = new GitHubApiClient(token);
+    await expect(client.validateToken()).rejects.toThrow(/rate limit exceeded/i);
+  });
+
+  it('returns scopes and rate limit metadata', async () => {
+    mockFetch.mockResolvedValueOnce(
+      response(
+        { login: 'octocat' },
+        {
+          headers: {
+            'X-OAuth-Scopes': 'repo, read:org',
+            'X-RateLimit-Limit': '5000',
+            'X-RateLimit-Remaining': '4998',
+            'X-RateLimit-Reset': '1700000000',
           },
-          head_commit: {
-            id: 'abc123',
-            message: 'Update README',
-            timestamp: '2023-01-01T00:00:00Z',
-            author: {
-              name: 'Test User',
-              email: 'test@example.com'
-            }
-          }
         }
-      ];
+      )
+    );
 
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        json: jest.fn().mockResolvedValueOnce({ workflow_runs: mockRuns }),
-        headers: new Headers()
-      } as any);
+    const client = new GitHubApiClient(token);
+    const details = await client.getTokenDetails();
 
-      const result = await client.getWorkflowRuns('testuser', 'test-repo');
-
-      expect(mockFetch).toHaveBeenCalledWith(
-        'https://api.github.com/repos/testuser/test-repo/actions/runs?',
-        expect.any(Object)
-      );
-      
-      expect(result).toEqual(mockRuns);
-    });
-
-    it('should include query parameters when options are provided', async () => {
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        json: jest.fn().mockResolvedValueOnce({ workflow_runs: [] }),
-        headers: new Headers()
-      } as any);
-
-      await client.getWorkflowRuns('testuser', 'test-repo', {
-        status: 'completed',
-        branch: 'main',
-        per_page: 10,
-        page: 1
-      });
-
-      expect(mockFetch).toHaveBeenCalledWith(
-        'https://api.github.com/repos/testuser/test-repo/actions/runs?status=completed&branch=main&per_page=10&page=1',
-        expect.any(Object)
-      );
-    });
+    expect(details.scopes).toEqual(['repo', 'read:org']);
+    expect(details.rateLimit).toMatchObject({ limit: 5000, remaining: 4998 });
   });
 
-  describe('getRateLimit', () => {
-    it('should fetch rate limit information', async () => {
-      const mockRateLimit = {
-        rate: {
-          limit: 5000,
-          remaining: 4999,
-          reset: 1234567890
+  it('retries a 503 once and then succeeds', async () => {
+    mockFetch
+      .mockResolvedValueOnce(response({ message: 'unavailable' }, { status: 503 }))
+      .mockResolvedValueOnce(response({ login: 'octocat' }));
+
+    const client = new GitHubApiClient(token);
+    await expect(client.validateToken()).resolves.toMatchObject({ login: 'octocat' });
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('rejects path traversal in owner or repository names', async () => {
+    const client = new GitHubApiClient(token);
+    await expect(client.getWorkflows('../evil', 'repo')).rejects.toThrow(/invalid github repository/i);
+    await expect(client.getWorkflows('owner', 'repo/../../x')).rejects.toThrow(/invalid github repository/i);
+  });
+
+  it('encodes owner and repository path segments', async () => {
+    mockFetch.mockResolvedValueOnce(response({ workflow_runs: [] }));
+
+    const client = new GitHubApiClient(token);
+    await client.getWorkflowRunSnapshot('owner', 'my.repo');
+
+    expect(mockFetch.mock.calls[0][0]).toBe(
+      'https://api.github.com/repos/owner/my.repo/actions/runs?per_page=50'
+    );
+  });
+
+  it('caps per_page at 100', async () => {
+    mockFetch.mockResolvedValueOnce(response({ workflow_runs: [] }));
+
+    const client = new GitHubApiClient(token);
+    await client.getWorkflowRunSnapshot('owner', 'repo', { per_page: 500 });
+
+    expect(mockFetch.mock.calls[0][0]).toContain('per_page=100');
+  });
+
+  it('returns a run snapshot with runs and metadata', async () => {
+    mockFetch.mockResolvedValueOnce(
+      response(
+        { workflow_runs: [{ id: 1, workflow_id: 10 }] },
+        {
+          headers: {
+            'X-OAuth-Scopes': 'repo',
+            'X-RateLimit-Limit': '5000',
+            'X-RateLimit-Remaining': '100',
+          },
         }
-      };
+      )
+    );
 
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        json: jest.fn().mockResolvedValueOnce(mockRateLimit),
-        headers: new Headers()
-      } as any);
+    const client = new GitHubApiClient(token);
+    const snapshot = await client.getWorkflowRunSnapshot('owner', 'repo');
 
-      const result = await client.getRateLimit();
-
-      expect(mockFetch).toHaveBeenCalledWith(
-        'https://api.github.com/rate_limit',
-        expect.any(Object)
-      );
-      
-      expect(result).toEqual(mockRateLimit);
-    });
+    expect(snapshot.runs).toHaveLength(1);
+    expect(snapshot.scopes).toEqual(['repo']);
+    expect(snapshot.rateLimit.remaining).toBe(100);
   });
 
-  describe('error handling', () => {
-    it('should handle network errors', async () => {
-      mockFetch.mockRejectedValueOnce(new Error('Network error'));
+  it('uses the user endpoint for personal repositories and org endpoint otherwise', async () => {
+    mockFetch
+      .mockResolvedValueOnce(response([]))
+      .mockResolvedValueOnce(response([]));
 
-      await expect(client.validateToken()).rejects.toThrow('Network error');
-    });
+    const client = new GitHubApiClient(token);
+    await client.getRepositories('octocat', true, { per_page: 10, page: 2 });
+    await client.getRepositories('acme', false, { sort: 'updated' });
 
-    it('should handle JSON parsing errors in error responses', async () => {
-      mockFetch.mockResolvedValueOnce({
-        ok: false,
-        status: 500,
-        json: jest.fn().mockRejectedValueOnce(new Error('Invalid JSON')),
-        headers: new Headers()
-      } as any);
-
-      await expect(client.validateToken()).rejects.toThrow(GitHubApiError);
-      await expect(client.validateToken()).rejects.toThrow('GitHub API Error: 500');
-    });
+    expect(mockFetch.mock.calls[0][0]).toBe(
+      'https://api.github.com/users/octocat/repos?per_page=10&page=2'
+    );
+    expect(mockFetch.mock.calls[1][0]).toBe(
+      'https://api.github.com/orgs/acme/repos?sort=updated'
+    );
   });
 
-  describe('rate limiting', () => {
-    it('should extract rate limit headers from responses', async () => {
-      const mockUser = {
-        login: 'testuser',
-        id: 12345,
-        avatar_url: 'https://github.com/images/error/testuser_happy.gif',
-        name: 'Test User',
-        email: 'test@example.com',
-        public_repos: 10,
-        public_gists: 5,
-        followers: 100,
-        following: 50,
-        created_at: '2023-01-01T00:00:00Z'
-      };
+  it('keeps only the latest run per workflow', async () => {
+    mockFetch.mockResolvedValueOnce(
+      response({
+        workflow_runs: [
+          { id: 2, workflow_id: 10, created_at: '2026-01-02T00:00:00Z' },
+          { id: 1, workflow_id: 10, created_at: '2026-01-01T00:00:00Z' },
+          { id: 3, workflow_id: 11, created_at: '2026-01-01T00:00:00Z' },
+        ],
+      })
+    );
 
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        json: jest.fn().mockResolvedValueOnce(mockUser),
-        headers: new Headers({
-          'X-RateLimit-Limit': '5000',
-          'X-RateLimit-Remaining': '4999',
-          'X-RateLimit-Reset': '1234567890'
-        })
-      } as any);
+    const client = new GitHubApiClient(token);
+    const latest = await client.getLatestWorkflowStatuses('owner', 'repo');
 
-      // Access the makeRequest method indirectly through validateToken
-      const result = await client.validateToken();
-      expect(result).toEqual(mockUser);
-      // Note: We can't directly test the rate limit extraction without exposing makeRequest,
-      // but this ensures the flow works without throwing errors
-    });
+    expect(latest[10].id).toBe(2);
+    expect(latest[11].id).toBe(3);
+  });
+
+  it('fetches jobs for a run and paginates until a short page', async () => {
+    const firstPage = Array.from({ length: 100 }, (_, index) => ({ id: index + 1 }));
+    mockFetch
+      .mockResolvedValueOnce(response({ total_count: 101, jobs: firstPage }))
+      .mockResolvedValueOnce(response({ total_count: 101, jobs: [{ id: 101 }] }));
+
+    const client = new GitHubApiClient(token);
+    const jobs = await client.getWorkflowRunJobs('owner', 'repo', 99);
+
+    expect(jobs).toHaveLength(101);
+    expect(mockFetch.mock.calls[0][0]).toBe(
+      'https://api.github.com/repos/owner/repo/actions/runs/99/jobs?per_page=100&page=1'
+    );
+    expect(mockFetch.mock.calls[1][0]).toContain('page=2');
+  });
+
+  it('rejects an invalid workflow run id', async () => {
+    const client = new GitHubApiClient(token);
+    await expect(client.getWorkflowRunJobs('owner', 'repo', 0)).rejects.toThrow(/invalid workflow run id/i);
+    await expect(client.getWorkflowRunJobs('owner', 'repo', 1.5)).rejects.toThrow(/invalid workflow run id/i);
+  });
+});
+
+describe('isValidGitHubName', () => {
+  it.each(['octocat', 'my.repo', 'repo_name', 'a-b'])('accepts %s', (name) => {
+    expect(isValidGitHubName(name)).toBe(true);
+  });
+
+  it.each(['', '.', '..', '../x', 'a/b', 'a b', '-leading'])('rejects %s', (name) => {
+    expect(isValidGitHubName(name)).toBe(false);
   });
 });

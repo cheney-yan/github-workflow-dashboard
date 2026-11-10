@@ -34,6 +34,11 @@ export interface GitHubWorkflow {
   badge_url: string;
 }
 
+export interface GitHubWorkflowRunActor {
+  login: string;
+  avatar_url?: string;
+}
+
 export interface GitHubWorkflowRun {
   id: number;
   name: string;
@@ -43,17 +48,20 @@ export interface GitHubWorkflowRun {
   display_title: string;
   run_number: number;
   event: string;
-  status: 'queued' | 'in_progress' | 'completed' | 'waiting' | 'requested';
-  conclusion: 'success' | 'failure' | 'neutral' | 'cancelled' | 'skipped' | 'timed_out' | 'action_required' | null;
+  status: 'queued' | 'in_progress' | 'completed' | 'waiting' | 'requested' | 'pending';
+  conclusion: 'success' | 'failure' | 'neutral' | 'cancelled' | 'skipped' | 'timed_out' | 'action_required' | 'stale' | null;
   workflow_id: number;
   url: string;
   html_url: string;
+  jobs_url?: string;
+  logs_url?: string;
+  check_suite_url?: string;
   created_at: string;
+  /** When GitHub actually started the job; absent for runs that never started. */
+  run_started_at?: string;
   updated_at: string;
-  actor: {
-    login: string;
-    avatar_url: string;
-  };
+  actor: GitHubWorkflowRunActor;
+  triggering_actor?: GitHubWorkflowRunActor;
   run_attempt: number;
   repository: {
     id: number;
@@ -71,7 +79,7 @@ export interface GitHubWorkflowRun {
       name: string;
       email: string;
     };
-  };
+  } | null;
 }
 
 export interface GitHubUser {
@@ -87,18 +95,61 @@ export interface GitHubUser {
   created_at: string;
 }
 
+export interface GitHubRateLimit {
+  limit: number;
+  remaining: number;
+  reset: number;
+  used?: number;
+}
+
 export interface GitHubApiResponse<T> {
   data: T;
   status: number;
   headers: Record<string, string>;
-  rateLimit?: {
-    limit: number;
-    remaining: number;
-    reset: number;
-  };
+  rateLimit?: GitHubRateLimit;
+  scopes: string[];
 }
 
-export interface GitHubApiError {
+export interface GitHubWorkflowRunSnapshot {
+  runs: GitHubWorkflowRun[];
+  totalCount: number;
+  rateLimit: GitHubRateLimit;
+  scopes: string[];
+}
+
+export interface GitHubWorkflowStep {
+  name: string;
+  status: string;
+  conclusion: string | null;
+  number: number;
+  started_at: string | null;
+  completed_at: string | null;
+}
+
+export interface GitHubWorkflowJob {
+  id: number;
+  run_id: number;
+  name: string;
+  status: string;
+  conclusion: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+  runner_id?: number | null;
+  runner_name?: string | null;
+  runner_group_id?: number | null;
+  runner_group_name?: string | null;
+  labels: string[];
+  html_url: string;
+  steps?: GitHubWorkflowStep[];
+}
+
+export interface GitHubTokenDetails {
+  user: GitHubUser;
+  scopes: string[];
+  rateLimit: GitHubRateLimit;
+}
+
+export interface GitHubApiErrorBody {
   message: string;
   documentation_url?: string;
   status: number;

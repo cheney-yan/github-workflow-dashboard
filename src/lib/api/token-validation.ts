@@ -1,4 +1,5 @@
 import { GitHubApiClient } from './github';
+import type { GitHubRateLimit } from './types';
 
 export interface TokenValidationResult {
   isValid: boolean;
@@ -7,78 +8,83 @@ export interface TokenValidationResult {
     name: string | null;
     avatar_url: string;
   };
+  scopes?: string[];
+  rateLimit?: GitHubRateLimit;
   error?: string;
-  rateLimit?: {
-    limit: number;
-    remaining: number;
-    reset: number;
-  };
 }
 
 /**
- * Validates a GitHub personal access token by making a test API call
- * @param token - GitHub personal access token
- * @returns Promise<TokenValidationResult> - Validation result with user info or error
+ * Validate a GitHub personal access token by calling /user.
+ * Returns the authenticated identity, token scopes and rate-limit state.
  */
 export async function validateGitHubToken(token: string): Promise<TokenValidationResult> {
   if (!token || token.trim().length === 0) {
+    return { isValid: false, error: 'Token is required' };
+  }
+
+  if (!isValidTokenFormat(token)) {
     return {
       isValid: false,
-      error: 'Token is required'
+      error: 'Token format is not recognised. Expected a GitHub personal access token.',
     };
   }
 
   try {
     const client = new GitHubApiClient(token);
-    const user = await client.validateToken();
-    
+    const details = await client.getTokenDetails();
+
     return {
       isValid: true,
       user: {
-        login: user.login,
-        name: user.name,
-        avatar_url: user.avatar_url
-      }
+        login: details.user.login,
+        name: details.user.name,
+        avatar_url: details.user.avatar_url,
+      },
+      scopes: details.scopes,
+      rateLimit: details.rateLimit,
     };
   } catch (error) {
-    if (error instanceof Error) {
-      return {
-        isValid: false,
-        error: error.message
-      };
-    }
-    
     return {
       isValid: false,
-      error: 'Unknown error occurred during token validation'
+      error: error instanceof Error ? error.message : 'Unknown error occurred during token validation',
     };
   }
 }
 
 /**
- * Quick check if a token format looks valid (basic format validation only)
- * @param token - Token string to validate
- * @returns boolean - Whether the token format appears valid
+ * Basic offline format check. This is a UX guard only; the API remains the
+ * source of truth for whether a token is valid.
  */
 export function isValidTokenFormat(token: string): boolean {
-  if (!token || typeof token !== 'string') {
-    return false;
-  }
+  if (!token || typeof token !== 'string') return false;
 
-  // GitHub Personal Access Tokens typically start with 'ghp_' and are 40+ chars
-  // GitHub App tokens start with 'ghs_'
-  // Classic tokens are 40 hex characters
-  const trimmedToken = token.trim();
-  
-  // Check for new format tokens
-  if (trimmedToken.startsWith('ghp_') || trimmedToken.startsWith('ghs_')) {
-    return trimmedToken.length >= 40;
-  }
-  
-  // Check for classic format (40 hex characters)
-  if (trimmedToken.length === 40 && /^[a-f0-9]{40}$/i.test(trimmedToken)) {
+  const trimmed = token.trim();
+  if (trimmed.length > 512) return false;
+
+  // Fine-grained (github_pat_), classic (ghp_), server-to-server (ghs_),
+  // user-to-server (ghu_) and OAuth (gho_) tokens.
+  if (/^(gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,})$/.test(trimmed)) {
     return true;
   }
-  
-  return false;
+
+  // Very old classic tokens were 40 hex characters.
+  return /^[a-f0-9]{40}$/i.test(trimmed);
+}
+
+/**
+ * Scopes that are far broader than a read-only dashboard needs. Surfaced in
+ * the UI so users can switch to a least-privilege fine-grained token.
+ */
+export function findExcessiveScopes(scopes: string[]): string[] {
+  const risky = [
+    'admin:org',
+    'admin:public_key',
+    'admin:repo_hook',
+    'delete_repo',
+    'write:packages',
+    'delete:packages',
+    'write:org',
+    'manage_runners:org',
+  ];
+  return scopes.filter((scope) => risky.includes(scope));
 }

@@ -1,110 +1,90 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Guidance for agents working in this repository.
 
-## Development Commands
+## Commands
 
-- **Development server**: `npm run dev` (starts on http://localhost:3000)
-- **Build**: `npm run build`
-- **Start production**: `npm start`
-- **Lint**: `npm run lint`
-- **Tests**: 
-  - `npm test` (run all Jest tests)
-  - `npm run test:watch` (Jest in watch mode)
-  - `npm run test:integration` (integration tests using tsx)
+- `npm run dev` — development server on <http://localhost:3000>
+- `npm run build` — production build (webpack; Turbopack's native binding is blocked on some Windows hosts)
+- `npm start` — serve the production build
+- `npm run lint` / `npm run typecheck`
+- `npm test` / `npm run test:coverage`
+- `npm run audit:prod` — production dependency audit (must stay clean)
 
-## Project Architecture
+Run the full gate with:
 
-This is a Next.js 15 application using the App Router pattern for a GitHub Actions workflow dashboard. The application monitors GitHub workflows across repositories with real-time status updates.
+```bash
+npm run lint && npm run typecheck && npm test -- --ci && npm run build
+```
 
-### Core Architecture
+Docker gate (Linux, matches CI):
 
-**Context-Based State Management**:
-- Multiple React contexts provide application-wide state management
-- Context hierarchy (outermost to innermost): Theme → DisplaySettings → GitHubToken → RepositorySelection → Workflow
-- All contexts are located in `src/contexts/` and follow the provider pattern
+```bash
+docker run --rm -v "$PWD:/app" -v gwm_node_modules:/app/node_modules \
+  -w /app node:24-alpine sh -c "npm ci && npm run lint && npm run typecheck && npm test -- --ci && npm run build"
+```
 
-**Main Contexts**:
-- `GitHubTokenProvider`: Manages GitHub token authentication and secure storage
-- `RepositorySelectionProvider`: Handles repository selection and filtering
-- `WorkflowProvider`: Manages workflow data and auto-refresh functionality
-- `ThemeProvider`: Dark/light theme management
-- `DisplaySettingsProvider`: UI preferences and refresh intervals
+## Architecture
 
-**Component Structure**:
-- `WorkflowDashboard`: Main dashboard component that orchestrates the entire UI
-- `RepositorySelection`: Repository picker and filtering interface
-- UI components in `src/components/ui/` following shadcn/ui patterns
-- All components use Tailwind CSS with custom design system
+Next.js 16 App Router, React 19, TypeScript, Tailwind CSS 4, shadcn/ui on Radix.
+The dashboard is client-heavy; a small Node route-handler layer provides local
+account login, session cookies, per-user encrypted GitHub tokens and health
+checks.
 
-**API Layer**:
-- `GitHubApiClient` class in `src/lib/api/github.ts` handles all GitHub API interactions
-- Type definitions in `src/lib/api/types.ts` for GitHub API responses
-- Token validation and user authentication in `src/lib/api/token-validation.ts`
+Context hierarchy in `src/app/layout.tsx`:
 
-**Security & Storage**:
-- Secure storage implementation in `src/lib/storage/secure-storage.ts`
-- GitHub tokens stored securely using browser APIs when available
-- Fallback to localStorage with appropriate warnings
+`Theme → DisplaySettings → GitHubToken → RepositorySelection → Workflow`
 
-### Key Features
+- `src/contexts/github-token-context.tsx` — validates the PAT, stores it
+  encrypted, exposes `userId`, `scopes`, `rateLimit`.
+- `src/contexts/repository-selection-context.tsx` — organizations, repository
+  list, per-repository workflow activity, persisted selection.
+- `src/contexts/workflow-context.tsx` — one `actions/runs` request per
+  repository; derives per-workflow histories and repository metrics; auto-refresh
+  with jitter and a concurrency cap.
+- `src/lib/api/github.ts` — the only GitHub API client. Validates and encodes
+  owner/repo names, sets timeouts, retries idempotent failures, captures scopes
+  and rate limits.
+- `src/lib/workflow-metrics.ts` — pure timing/health calculations. Add tests here
+  whenever the formulas change.
+- `src/lib/format.ts` — duration/relative-time formatting.
+- `src/lib/workflow-filters.ts` — status + "Only me" run filtering.
+- `src/components/workflow-dashboard.tsx` — thin orchestrator. Presentation lives
+  in `dashboard-header.tsx`, `dashboard-summary.tsx`,
+  `repository-workflow-card.tsx`, `compact-workflow-grid.tsx`,
+  `repository-row.tsx`, `workflow-jobs.tsx`, `runner-utilization.tsx` and
+  `workflow-stats.tsx`.
+- `src/lib/alerts.ts` + `src/hooks/use-workflow-alerts.ts` — pure alert rules and
+  browser-notification delivery (deduplicated per run).
+- `src/components/insecure-context-banner.tsx` — HTTP-only warning; the app must
+  still render and work behind a TLS reverse proxy.
+- `src/app/api/health/route.ts`, `src/instrumentation.ts`, `src/middleware.ts` —
+  health/version endpoint, startup/error logs and the request access log. Keep
+  logs JSON lines and never include tokens or query strings.
+- `src/app/settings/components/` — token, display, instructions and security
+  sections; the page only composes them.
+- `src/lib/auth/store.ts` — users, scrypt password hashes, AES-256-GCM token
+  encryption and the JSON store under `DATA_DIR`.
+- `src/lib/auth/session.ts` — HMAC-signed session cookie, origin/HTTPS checks.
+- `src/app/api/auth/*` — login, logout, me, change-password, token and admin user
+  creation. Routes enforce the session; the client gate is only cosmetic.
+- `src/contexts/auth-context.tsx` + `src/components/auth-gate.tsx` — login state
+  and route gating.
+- `src/app/login/page.tsx` — sign-in and forced first-login password change.
+- `src/lib/storage/secure-storage.ts` — public encrypted browser storage API;
+  `storage-crypto.ts` holds the IndexedDB, HKDF and AES-256-GCM primitives.
+  Never persist a token in plaintext.
 
-**Real-time Workflow Monitoring**:
-- Auto-refresh functionality with configurable intervals (30s, 1min, 2min, 5min)
-- Status-based filtering and repository selection
-- Unified color system for workflow statuses across the application
+## Conventions
 
-**User-Centric Features**:
-- "About Me" functionality that filters workflows by the authenticated user
-- Repository hiding/showing with persistent state
-- Responsive design with mobile-first approach
-
-### Status Color System
-
-The application uses a unified status color system defined in `src/lib/status-colors.ts`:
-- Success: Green variants
-- Failure: Red variants  
-- In Progress/Running: Blue variants
-- Queued/Waiting: Yellow/amber variants
-- Cancelled/Skipped: Gray variants
-
-All status indicators (badges, icons, backgrounds) must use these consistent colors.
-
-### Testing Strategy
-
-**Test Structure**:
-- Unit tests using Jest and React Testing Library
-- Integration tests in `__tests__/` directory
-- Comprehensive GitHub API testing
-- Repository loading and filtering flow tests
-
-**Test Files of Note**:
-- `github-api.test.ts`: GitHub API client tests
-- `workflow-dashboard-integration.test.ts`: Main dashboard integration tests
-- `secure-storage.test.ts`: Security and storage tests
-
-### Development Patterns
-
-**Component Patterns**:
-- Use `'use client'` directive for client-side components
-- Follow the established context patterns for state management
-- Use Lucide React for icons consistently
-- Implement responsive design with Tailwind breakpoints
-
-**API Patterns**:
-- All GitHub API calls go through the `GitHubApiClient` class
-- Error handling uses custom `GitHubApiError` class
-- Rate limiting awareness (GitHub API has limits)
-
-**State Management**:
-- Use contexts for cross-component state
-- Local state with `useState` for component-specific data
-- Persistent storage through secure storage utility
-
-## UI Framework
-
-Uses shadcn/ui components with:
-- Tailwind CSS for styling
-- Radix UI primitives for accessibility
-- Custom design tokens in neutral color scheme
-- Responsive design patterns
+- Prefer React text interpolation; do not add `dangerouslySetInnerHTML`.
+- Do not add CDN scripts, styles or fonts. Every asset must be bundled and served
+  from the app origin; icons come from `lucide-react`, not an external sprite.
+- Any new network host must be added to `connect-src` in `next.config.ts` and
+  justified in the PR.
+- External links need `rel="noopener noreferrer"`.
+- Tests live in `__tests__/` and must match `*.test.ts(x)`. Do not add standalone
+  scripts that call `process.exit` there.
+- The Docker image must stay non-root and keep working with a read-only root
+  filesystem.
+- Security-relevant changes also update `docs/SECURITY-AUDIT.md`.

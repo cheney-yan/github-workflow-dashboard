@@ -4,9 +4,23 @@
  */
 'use client';
 
-import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
-import { setSecureItem, getSecureItem, removeSecureItem, isSecureStorageAvailable, STORAGE_KEYS } from '@/lib/storage/secure-storage';
+import React, {
+  createContext,
+  useContext,
+  useState,
+  useEffect,
+  useCallback,
+  ReactNode,
+} from 'react';
+import {
+  setSecureItem,
+  getSecureItem,
+  removeSecureItem,
+  isSecureStorageAvailable,
+  STORAGE_KEYS,
+} from '@/lib/storage/secure-storage';
 import { validateGitHubToken } from '@/lib/api/token-validation';
+import type { GitHubRateLimit } from '@/lib/api/types';
 
 interface GitHubTokenContextType {
   token: string | null;
@@ -14,6 +28,8 @@ interface GitHubTokenContextType {
   isLoading: boolean;
   error: string | null;
   userId?: string | null;
+  scopes: string[];
+  rateLimit: GitHubRateLimit | null;
   setToken: (token: string) => Promise<void>;
   removeToken: () => Promise<void>;
   validateToken: () => Promise<boolean>;
@@ -33,143 +49,197 @@ export function GitHubTokenProvider({ children }: GitHubTokenProviderProps) {
   const [error, setError] = useState<string | null>(null);
   const [isSecureStorageSupported, setIsSecureStorageSupported] = useState(false);
   const [userId, setUserId] = useState<string | null>(null);
+  const [scopes, setScopes] = useState<string[]>([]);
+  const [rateLimit, setRateLimit] = useState<GitHubRateLimit | null>(null);
 
-  // Check secure storage availability on mount
-  useEffect(() => {
-    setIsSecureStorageSupported(isSecureStorageAvailable());
-  }, []);
+  const persist = useCallback(
+    async (key: string, value: string, available: boolean) => {
+      if (!available) return;
+      await setSecureItem(key, value);
+    },
+    []
+  );
 
-  // Load token from secure storage on mount
+  // Check storage availability and restore the session in one pass.
   useEffect(() => {
-    async function loadStoredToken() {
-      console.log('[GitHub Token Context] Loading stored token...');
-      if (!isSecureStorageSupported) {
-        console.log('[GitHub Token Context] Secure storage not supported, skipping token load');
+    let cancelled = false;
+
+    async function restoreSession() {
+      const available = await isSecureStorageAvailable();
+      if (cancelled) return;
+      setIsSecureStorageSupported(available);
+
+      if (!available) {
+        // The server-side account store can still provide a token even when
+        // browser storage is unavailable.
+        try {
+          const response = await fetch('/api/auth/token', { credentials: 'same-origin' });
+          if (response.ok) {
+            const data = (await response.json()) as { token: string | null };
+            if (data.token) {
+              setTokenState(data.token);
+              const validation = await validateGitHubToken(data.token);
+              setIsValidated(validation.isValid);
+              if (validation.user?.login) setUserId(validation.user.login);
+            }
+          }
+        } catch {
+          // Ignore; the user can sign in and add a token.
+        }
         setIsLoading(false);
         return;
       }
 
       try {
-        const storedToken = await getSecureItem(STORAGE_KEYS.GITHUB_TOKEN);
-        console.log('[GitHub Token Context] Stored token found:', !!storedToken);
-        
-        if (storedToken) {
-          setTokenState(storedToken);
-          // Validate the stored token
-          console.log('[GitHub Token Context] Validating stored token...');
-          const validation = await validateGitHubToken(storedToken);
-          console.log('[GitHub Token Context] Stored token validation result:', validation);
-          
-          setIsValidated(validation.isValid);
-          if (!validation.isValid) {
-            console.warn('[GitHub Token Context] Stored token is no longer valid');
-            setError('Stored token is no longer valid');
-          } else {
-            console.log('[GitHub Token Context] Stored token is valid');
-            // load stored userId if available
-            try {
-              const storedUserId = await getSecureItem(STORAGE_KEYS.GITHUB_USER_ID);
-              if (storedUserId) {
-                setUserId(storedUserId as string);
-              }
-            } catch (err) {
-              console.warn('[GitHub Token Context] Failed to load stored userId', err);
-            }
+        const [storedToken, storedUserId, storedScopes] = await Promise.all([
+          getSecureItem(STORAGE_KEYS.GITHUB_TOKEN),
+          getSecureItem(STORAGE_KEYS.GITHUB_USER_ID),
+          getSecureItem(STORAGE_KEYS.GITHUB_TOKEN_SCOPES),
+        ]);
+        if (cancelled) return;
+
+        let serverToken: string | null = null;
+        try {
+          const response = await fetch('/api/auth/token', { credentials: 'same-origin' });
+          if (response.ok) {
+            const data = (await response.json()) as { token: string | null };
+            serverToken = data.token;
           }
-        } else {
-          console.log('[GitHub Token Context] No stored token found');
+        } catch {
+          // Fall back to local storage below.
         }
+        if (cancelled) return;
+
+        const candidate = serverToken || storedToken;
+        if (!candidate) {
+          setIsLoading(false);
+          return;
+        }
+
+        setTokenState(candidate);
+        if (storedUserId) setUserId(storedUserId);
+        if (storedScopes) {
+          try {
+            const parsed = JSON.parse(storedScopes);
+            if (Array.isArray(parsed)) setScopes(parsed.filter((s) => typeof s === 'string'));
+          } catch {
+            // Ignore malformed cached scopes; they are refreshed below.
+          }
+        }
+
+        const validation = await validateGitHubToken(candidate);
+        if (cancelled) return;
+
+        setIsValidated(validation.isValid);
+        if (!validation.isValid) {
+          setError('Stored token is no longer valid. Add a new token to continue.');
+        } else {
+          if (validation.scopes) {
+            setScopes(validation.scopes);
+            await persist(STORAGE_KEYS.GITHUB_TOKEN_SCOPES, JSON.stringify(validation.scopes), available);
+          }
+          if (validation.rateLimit) setRateLimit(validation.rateLimit);
+          if (validation.user?.login) {
+            setUserId(validation.user.login);
+            await persist(STORAGE_KEYS.GITHUB_USER_ID, validation.user.login, available);
+          }
+          // Migrate a locally stored token into the signed-in account once.
+          if (!serverToken && storedToken) {
+            await fetch('/api/auth/token', {
+              method: 'PUT',
+              credentials: 'same-origin',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ token: storedToken }),
+            }).catch(() => undefined);
+          }
+        }
+      } catch {
+        if (!cancelled) setError('Failed to load the stored token.');
+      } finally {
+        if (!cancelled) setIsLoading(false);
+      }
+    }
+
+    restoreSession();
+    return () => {
+      cancelled = true;
+    };
+  }, [persist]);
+
+  const setToken = useCallback(
+    async (newToken: string): Promise<void> => {
+      setError(null);
+      setIsLoading(true);
+
+      try {
+        const validation = await validateGitHubToken(newToken);
+        if (!validation.isValid) {
+          throw new Error(validation.error || 'Invalid GitHub token');
+        }
+
+        await persist(STORAGE_KEYS.GITHUB_TOKEN, newToken, isSecureStorageSupported);
+        if (validation.user?.login) {
+          await persist(STORAGE_KEYS.GITHUB_USER_ID, validation.user.login, isSecureStorageSupported);
+          setUserId(validation.user.login);
+        }
+        if (validation.scopes) {
+          setScopes(validation.scopes);
+          await persist(
+            STORAGE_KEYS.GITHUB_TOKEN_SCOPES,
+            JSON.stringify(validation.scopes),
+            isSecureStorageSupported
+          );
+        }
+        if (validation.rateLimit) setRateLimit(validation.rateLimit);
+
+        const saved = await fetch('/api/auth/token', {
+          method: 'PUT',
+          credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ token: newToken }),
+        });
+        if (!saved.ok) {
+          throw new Error('Token validated but could not be saved to your account.');
+        }
+
+        setTokenState(newToken);
+        setIsValidated(true);
       } catch (err) {
-        console.error('[GitHub Token Context] Failed to load stored token:', err);
-        setError('Failed to load stored token');
+        const message = err instanceof Error ? err.message : 'Failed to set token';
+        setError(message);
+        throw new Error(message);
       } finally {
         setIsLoading(false);
       }
-    }
+    },
+    [isSecureStorageSupported, persist]
+  );
 
-    loadStoredToken();
-  }, [isSecureStorageSupported]);
-
-  const setToken = async (newToken: string): Promise<void> => {
-    console.log('[GitHub Token Context] Setting token...');
+  const removeToken = useCallback(async (): Promise<void> => {
     setError(null);
-    setIsLoading(true);
 
     try {
-      // Validate the token first
-      console.log('[GitHub Token Context] Validating token...');
-      const validation = await validateGitHubToken(newToken);
-      console.log('[GitHub Token Context] Token validation result:', validation);
-      
-      if (!validation.isValid) {
-        console.error('[GitHub Token Context] Token validation failed:', validation.error);
-        throw new Error(validation.error || 'Invalid GitHub token');
-      }
-
-      // Store the token securely if storage is available
+      await fetch('/api/auth/token', {
+        method: 'DELETE',
+        credentials: 'same-origin',
+      }).catch(() => undefined);
       if (isSecureStorageSupported) {
-        console.log('[GitHub Token Context] Storing token securely...');
-        await setSecureItem(STORAGE_KEYS.GITHUB_TOKEN, newToken);
-      } else {
-        console.log('[GitHub Token Context] Secure storage not available, token will not persist');
+        removeSecureItem(STORAGE_KEYS.GITHUB_TOKEN);
+        removeSecureItem(STORAGE_KEYS.GITHUB_USER_ID);
+        removeSecureItem(STORAGE_KEYS.GITHUB_TOKEN_SCOPES);
+        removeSecureItem(STORAGE_KEYS.SELECTED_REPOSITORIES);
       }
-
-      setTokenState(newToken);
-      setIsValidated(true);
-      // Fetch authenticated user id and store it
-      try {
-        const res = await fetch('https://api.github.com/user', {
-          headers: {
-            Authorization: `token ${newToken}`,
-            Accept: 'application/vnd.github+json'
-          }
-        });
-
-        if (!res.ok) {
-          console.warn('[GitHub Token Context] Failed to fetch user info', res.status);
-        } else {
-          const data = await res.json();
-          const login = data && (data.login || data.id);
-          if (login) {
-            setUserId(login);
-            if (isSecureStorageSupported) {
-              await setSecureItem(STORAGE_KEYS.GITHUB_USER_ID, login);
-            }
-          }
-        }
-      } catch (err) {
-        console.warn('[GitHub Token Context] Error fetching user info', err);
-      }
-      console.log('[GitHub Token Context] Token successfully set and validated');
-    } catch (err) {
-      const message = err instanceof Error ? err.message : 'Failed to set token';
-      console.error('[GitHub Token Context] Error setting token:', err);
-      setError(message);
-      throw new Error(message);
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  const removeToken = async (): Promise<void> => {
-    setError(null);
-    
-    try {
-      if (isSecureStorageSupported) {
-        await removeSecureItem(STORAGE_KEYS.GITHUB_TOKEN);
-        await removeSecureItem(STORAGE_KEYS.GITHUB_USER_ID);
-      }
-      
       setTokenState(null);
       setUserId(null);
+      setScopes([]);
+      setRateLimit(null);
       setIsValidated(false);
-    } catch (err) {
-      console.error('Failed to remove token:', err);
+    } catch {
       setError('Failed to remove token');
     }
-  };
+  }, [isSecureStorageSupported]);
 
-  const validateToken = async (): Promise<boolean> => {
+  const validateToken = useCallback(async (): Promise<boolean> => {
     if (!token) {
       setIsValidated(false);
       return false;
@@ -181,21 +251,23 @@ export function GitHubTokenProvider({ children }: GitHubTokenProviderProps) {
     try {
       const validation = await validateGitHubToken(token);
       setIsValidated(validation.isValid);
-      
+
       if (!validation.isValid) {
         setError(validation.error || 'Token validation failed');
+        return false;
       }
-      
-      return validation.isValid;
+
+      if (validation.scopes) setScopes(validation.scopes);
+      if (validation.rateLimit) setRateLimit(validation.rateLimit);
+      return true;
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Token validation failed';
-      setError(message);
+      setError(err instanceof Error ? err.message : 'Token validation failed');
       setIsValidated(false);
       return false;
     } finally {
       setIsLoading(false);
     }
-  };
+  }, [token]);
 
   const contextValue: GitHubTokenContextType = {
     token,
@@ -203,6 +275,8 @@ export function GitHubTokenProvider({ children }: GitHubTokenProviderProps) {
     isLoading,
     error,
     userId,
+    scopes,
+    rateLimit,
     setToken,
     removeToken,
     validateToken,
