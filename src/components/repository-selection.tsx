@@ -9,50 +9,9 @@ import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { XCircle, Search, X, Check, Loader2, AlertCircle } from 'lucide-react';
-import { cn } from '@/lib/utils';
-import type { RepositoryWithWorkflowStatus, WorkflowStatus } from '@/contexts/repository-selection-context';
-
-// Helper function to get workflow status icon and styling
-const getWorkflowStatusInfo = (status: WorkflowStatus, workflowCount?: number) => {
-  switch (status) {
-    case 'unknown':
-      return {
-        icon: <div className="w-4 h-4 bg-muted rounded-full animate-pulse" />,
-        text: 'Checking...',
-        className: 'text-muted-foreground',
-        selectable: false
-      };
-    case 'checking':
-      return {
-        icon: <Loader2 className="w-4 h-4 animate-spin text-primary" />,
-        text: 'Checking workflows...',
-        className: 'text-primary',
-        selectable: false
-      };
-    case 'has-workflows':
-      return {
-        icon: <Check className="w-4 h-4 text-green-500 dark:text-green-400" />,
-        text: workflowCount ? `${workflowCount} workflow${workflowCount === 1 ? '' : 's'}` : 'Has workflows',
-        className: 'text-green-600 dark:text-green-400',
-        selectable: true
-      };
-    case 'no-workflows':
-      return {
-        icon: <AlertCircle className="w-4 h-4 text-muted-foreground" />,
-        text: 'No workflows',
-        className: 'text-muted-foreground',
-        selectable: false
-      };
-    case 'error':
-      return {
-        icon: <AlertCircle className="w-4 h-4 text-destructive" />,
-        text: 'Check failed',
-        className: 'text-destructive',
-        selectable: false
-      };
-  }
-};
+import { XCircle, Search, X } from 'lucide-react';
+import type { RepositoryWithWorkflowStatus } from '@/contexts/repository-selection-context';
+import { RepositoryRow, getWorkflowStatusInfo } from '@/components/repository-row';
 
 interface RepositorySelectionProps {
   onSelectionChange?: (repositories: RepositoryWithWorkflowStatus[]) => void;
@@ -359,78 +318,14 @@ export function RepositorySelection({ onSelectionChange }: RepositorySelectionPr
               </div>
             ) : (
               <div className="space-y-2 max-h-96 overflow-y-auto">
-                {sortedRepositories.map((repository) => {
-                  const statusInfo = getWorkflowStatusInfo(repository.workflowStatus, repository.workflowCount);
-                  const isSelectable = statusInfo.selectable;
-                  const isSelected = isRepositorySelected(repository);
-
-                  return (
-                    <div
-                      key={repository.id}
-                      className={cn(
-                        "flex items-start space-x-3 p-3 rounded-lg border transition-colors",
-                        isSelectable 
-                          ? "hover:bg-muted/50 cursor-pointer" 
-                          : "opacity-50 bg-muted/20"
-                      )}
-                      onClick={() => isSelectable && handleRepositoryToggle(repository)}
-                    >
-                      <Checkbox
-                        id={`repo-${repository.id}`}
-                        checked={isSelected}
-                        disabled={!isSelectable}
-                        onCheckedChange={() => isSelectable && handleRepositoryToggle(repository)}
-                      />
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2">
-                          <label
-                            htmlFor={`repo-${repository.id}`}
-                            className={cn(
-                              "text-sm font-medium leading-none cursor-pointer",
-                              !isSelectable && "cursor-not-allowed"
-                            )}
-                          >
-                            <span className="text-muted-foreground text-xs font-normal">{repository.owner.login}/</span>{repository.name}
-                          </label>
-                          {repository.private && (
-                            <Badge variant="secondary" className="text-xs">
-                              Private
-                            </Badge>
-                          )}
-                          <div className="flex items-center gap-1">
-                            {statusInfo.icon}
-                            <span className={cn("text-xs", statusInfo.className)}>
-                              {statusInfo.text}
-                            </span>
-                            {repository.workflowCount !== undefined && repository.workflowCount > 0 && (
-                              <Badge variant="outline" className="text-xs ml-1">
-                                {repository.workflowCount} workflow{repository.workflowCount > 1 ? 's' : ''}
-                              </Badge>
-                            )}
-                          </div>
-                        </div>
-                        {repository.description && (
-                          <p className="text-xs text-muted-foreground mt-1 line-clamp-2">
-                            {repository.description}
-                          </p>
-                        )}
-                        <div className="flex items-center gap-2 mt-2 text-xs text-muted-foreground">
-                          <span>Updated {new Date(repository.updated_at).toLocaleDateString()}</span>
-                          <span>•</span>
-                          <a
-                            href={repository.html_url}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="text-primary hover:text-primary/80 underline"
-                            onClick={(e) => e.stopPropagation()}
-                          >
-                            View on GitHub →
-                          </a>
-                        </div>
-                      </div>
-                    </div>
-                  );
-                })}
+                {sortedRepositories.map((repository) => (
+                  <RepositoryRow
+                    key={repository.id}
+                    repository={repository}
+                    selected={isRepositorySelected(repository)}
+                    onToggle={() => handleRepositoryToggle(repository)}
+                  />
+                ))}
               </div>
             )}
 

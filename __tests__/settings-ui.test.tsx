@@ -1,231 +1,201 @@
-/**
- * Functional UI Test for Settings Page
- * Tests the token management UI components
- */
-
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
-import '@testing-library/jest-dom';
+import { render, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import SettingsPage from '../src/app/settings/page';
-import { GitHubTokenProvider } from '../src/contexts/github-token-context';
 
-// Mock Next.js router
-jest.mock('next/navigation', () => ({
-  useRouter: () => ({
-    push: jest.fn(),
-    back: jest.fn(),
-  }),
-}));
+const setToken = jest.fn().mockResolvedValue(undefined);
+const removeToken = jest.fn().mockResolvedValue(undefined);
+const setDashboardName = jest.fn();
 
-// Mock the secure storage and GitHub API
-jest.mock('../src/lib/storage/secure-storage', () => ({
-  isSecureStorageAvailable: () => true,
-  setSecureItem: jest.fn().mockResolvedValue(undefined),
-  getSecureItem: jest.fn().mockResolvedValue(null),
-  removeSecureItem: jest.fn().mockResolvedValue(undefined),
-  STORAGE_KEYS: {
-    GITHUB_TOKEN: 'ifl_dashboard_github_token',
-    SELECTED_REPOSITORIES: 'ifl_dashboard_selected_repos',
-    USER_PREFERENCES: 'ifl_dashboard_preferences',
-    LAST_SYNC: 'ifl_dashboard_last_sync',
-  },
-}));
-
-jest.mock('../src/lib/api/token-validation', () => ({
-  validateGitHubToken: jest.fn().mockResolvedValue({ 
-    isValid: true,
-    error: null 
-  }),
-}));
-
-// Mock Web APIs
-Object.defineProperty(global, 'navigator', {
-  value: {
-    userAgent: 'test-browser',
-    language: 'en-US',
-  },
-  writable: true,
-});
-
-Object.defineProperty(global, 'screen', {
-  value: {
-    width: 1920,
-    height: 1080,
-  },
-  writable: true,
-});
-
-const mockCrypto = {
-  getRandomValues: (array: Uint8Array) => {
-    for (let i = 0; i < array.length; i++) {
-      array[i] = Math.floor(Math.random() * 256);
-    }
-    return array;
-  },
-  subtle: {
-    digest: jest.fn().mockResolvedValue(new ArrayBuffer(32)),
-    importKey: jest.fn().mockResolvedValue({ type: 'secret' } as CryptoKey),
-    deriveKey: jest.fn().mockResolvedValue({ type: 'secret' } as CryptoKey),
-    encrypt: jest.fn().mockResolvedValue(new ArrayBuffer(16)),
-    decrypt: jest.fn().mockResolvedValue(new ArrayBuffer(16)),
-  },
+const tokenState = {
+  token: null as string | null,
+  isValidated: false,
+  isLoading: false,
+  error: null as string | null,
+  userId: null as string | null,
+  scopes: [] as string[],
+  rateLimit: null as { limit: number; remaining: number; reset: number } | null,
+  setToken,
+  removeToken,
+  validateToken: jest.fn().mockResolvedValue(true),
+  isSecureStorageSupported: true,
 };
 
-Object.defineProperty(global, 'crypto', {
-  value: mockCrypto,
-  writable: true,
-});
+jest.mock('@/contexts/github-token-context', () => ({
+  useGitHubToken: () => tokenState,
+}));
 
-Object.defineProperty(global, 'window', {
-  value: {
-    crypto: mockCrypto,
-    localStorage: {
-      getItem: jest.fn().mockReturnValue(null),
-      setItem: jest.fn(),
-      removeItem: jest.fn(),
+jest.mock('@/contexts/theme-context', () => ({
+  useTheme: () => ({ theme: 'light', setTheme: jest.fn(), toggleTheme: jest.fn() }),
+}));
+
+jest.mock('@/contexts/auth-context', () => ({
+  useAuth: () => ({
+    user: {
+      id: 'u1',
+      username: 'admin',
+      isAdmin: true,
+      mustChangePassword: false,
+      hasToken: false,
     },
-    confirm: jest.fn().mockReturnValue(true),
-  },
-  writable: true,
+    loading: false,
+    error: null,
+    login: jest.fn(),
+    logout: jest.fn(),
+    changePassword: jest.fn(),
+    refresh: jest.fn(),
+  }),
+}));
+
+jest.mock('@/contexts/display-settings-context', () => {
+  const actual = jest.requireActual('@/contexts/display-settings-context');
+  return {
+    REFRESH_INTERVALS: actual.REFRESH_INTERVALS,
+    useDisplaySettings: () => ({
+      settings: {
+        compactMode: false,
+        refreshInterval: 120,
+        dashboardName: 'Workflow Monitor',
+        alerts: { enabled: false, notifyOnFailure: true, queueMinutes: 30, runMinutes: 90 },
+      },
+      updateSettings: jest.fn(),
+      toggleCompactMode: jest.fn(),
+      setRefreshInterval: jest.fn(),
+      getRefreshIntervalLabel: () => '2 minutes',
+      setDashboardName,
+      setAlertPreferences: jest.fn(),
+    }),
+  };
 });
 
-Date.prototype.getTimezoneOffset = jest.fn(() => -480);
+jest.mock('@/components/repository-selection', () => ({
+  RepositorySelection: () => <div data-testid="repository-selection" />,
+}));
 
-describe('Settings Page - Token Management UI', () => {
+jest.mock('next/navigation', () => ({
+  useRouter: () => ({ push: jest.fn(), replace: jest.fn(), refresh: jest.fn() }),
+  usePathname: () => '/settings',
+}));
+
+function resetTokenState(overrides: Partial<typeof tokenState> = {}) {
+  Object.assign(tokenState, {
+    token: null,
+    isValidated: false,
+    isLoading: false,
+    error: null,
+    userId: null,
+    scopes: [],
+    rateLimit: null,
+    isSecureStorageSupported: true,
+    ...overrides,
+  });
+}
+
+describe('Settings page - token management', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    resetTokenState();
   });
 
-  test('renders settings page with token input form', () => {
-    render(
-      <GitHubTokenProvider>
-        <SettingsPage />
-      </GitHubTokenProvider>
-    );
+  it('renders the token form and setup guidance', () => {
+    render(<SettingsPage />);
 
-    expect(screen.getByText('Settings')).toBeInTheDocument();
-    expect(screen.getByText('GitHub Token')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Settings' })).toBeInTheDocument();
     expect(screen.getByLabelText(/GitHub Personal Access Token/)).toBeInTheDocument();
-    expect(screen.getByText('Save Token')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Save Token' })).toBeDisabled();
+    expect(screen.getByText(/Fine-grained token with/i)).toBeInTheDocument();
   });
 
-  test('shows token requirements section', () => {
-    render(
-      <GitHubTokenProvider>
-        <SettingsPage />
-      </GitHubTokenProvider>
-    );
+  it('links to the GitHub token page with safe rel attributes', () => {
+    render(<SettingsPage />);
 
-    expect(screen.getByText('Token Requirements')).toBeInTheDocument();
-    expect(screen.getByText(/repo/)).toBeInTheDocument();
-    expect(screen.getByText(/actions:read/)).toBeInTheDocument();
+    const link = screen.getByRole('link', { name: /Create a token on GitHub/i });
+    expect(link).toHaveAttribute('href', 'https://github.com/settings/tokens');
+    expect(link).toHaveAttribute('target', '_blank');
+    expect(link).toHaveAttribute('rel', 'noopener noreferrer');
   });
 
-  test('allows entering a token', async () => {
-    render(
-      <GitHubTokenProvider>
-        <SettingsPage />
-      </GitHubTokenProvider>
-    );
+  it('enables submit only when a token is entered', async () => {
+    const user = userEvent.setup();
+    render(<SettingsPage />);
 
-    const tokenInput = screen.getByLabelText(/GitHub Personal Access Token/);
-    fireEvent.change(tokenInput, { target: { value: 'ghp_test123456789' } });
+    const input = screen.getByLabelText(/GitHub Personal Access Token/);
+    const submit = screen.getByRole('button', { name: 'Save Token' });
 
-    expect(tokenInput).toHaveValue('ghp_test123456789');
+    await user.type(input, 'ghp_test');
+    expect(submit).toBeEnabled();
+
+    await user.click(submit);
+    await waitFor(() => expect(setToken).toHaveBeenCalledWith('ghp_test'));
   });
 
-  test('submit button is disabled when token input is empty', () => {
-    render(
-      <GitHubTokenProvider>
-        <SettingsPage />
-      </GitHubTokenProvider>
-    );
+  it('never renders a token prefix for a stored token', () => {
+    resetTokenState({ token: 'ghp_abcdefghijklmnop', isValidated: true });
+    render(<SettingsPage />);
 
-    const submitButton = screen.getByText('Save Token');
-    expect(submitButton).toBeDisabled();
+    expect(screen.queryByDisplayValue(/ghp_/)).not.toBeInTheDocument();
+    expect(screen.getByLabelText(/Stored GitHub token/i)).toHaveValue('••••••••••••••••');
   });
 
-  test('submit button is enabled when token input has value', () => {
-    render(
-      <GitHubTokenProvider>
-        <SettingsPage />
-      </GitHubTokenProvider>
-    );
-
-    const tokenInput = screen.getByLabelText(/GitHub Personal Access Token/);
-    const submitButton = screen.getByText('Save Token');
-
-    fireEvent.change(tokenInput, { target: { value: 'ghp_test123456789' } });
-
-    expect(submitButton).not.toBeDisabled();
-  });
-
-  test('shows back to dashboard link', () => {
-    render(
-      <GitHubTokenProvider>
-        <SettingsPage />
-      </GitHubTokenProvider>
-    );
-
-    const backLink = screen.getByText('← Back to Dashboard');
-    expect(backLink).toBeInTheDocument();
-    expect(backLink.closest('a')).toHaveAttribute('href', '/');
-  });
-
-  test('shows GitHub token creation link', () => {
-    render(
-      <GitHubTokenProvider>
-        <SettingsPage />
-      </GitHubTokenProvider>
-    );
-
-    const githubLink = screen.getByText('Create a token on GitHub →');
-    expect(githubLink).toBeInTheDocument();
-    expect(githubLink).toHaveAttribute('href', 'https://github.com/settings/tokens');
-    expect(githubLink).toHaveAttribute('target', '_blank');
-  });
-
-  test('shows secure storage supported badge', () => {
-    render(
-      <GitHubTokenProvider>
-        <SettingsPage />
-      </GitHubTokenProvider>
-    );
-
-    // Should not show the "not supported" badge since we mocked it as available
-    expect(screen.queryByText('Secure storage not supported')).not.toBeInTheDocument();
-  });
-
-  test('shows loading state during form submission', async () => {
-    // Mock a delayed token validation
-    const tokenValidationModule = await import('../src/lib/api/token-validation');
-    (tokenValidationModule.validateGitHubToken as jest.Mock).mockImplementation(() => new Promise(resolve => 
-      setTimeout(() => resolve({ isValid: true, error: null }), 100)
-    ));
-
-    render(
-      <GitHubTokenProvider>
-        <SettingsPage />
-      </GitHubTokenProvider>
-    );
-
-    const tokenInput = screen.getByLabelText(/GitHub Personal Access Token/);
-    const form = tokenInput.closest('form')!;
-
-    fireEvent.change(tokenInput, { target: { value: 'ghp_test123456789' } });
-    fireEvent.submit(form);
-
-    // Check for loading state
-    await waitFor(() => {
-      expect(screen.getByText('Validating...')).toBeInTheDocument();
+  it('shows reported token scopes and quota', () => {
+    resetTokenState({
+      token: 'ghp_abcdefghijklmnop',
+      isValidated: true,
+      scopes: ['repo', 'read:org'],
+      rateLimit: { limit: 5000, remaining: 4321, reset: 1700000000 },
     });
+    render(<SettingsPage />);
 
-    // Wait for the form to complete
-    await waitFor(() => {
-      expect(screen.queryByText('Validating...')).not.toBeInTheDocument();
-    }, { timeout: 200 });
+    expect(screen.getAllByText('repo').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('read:org').length).toBeGreaterThan(0);
+    expect(screen.getByText(/4,321 of 5,000/)).toBeInTheDocument();
+  });
+
+  it('warns about excessive token scopes', () => {
+    resetTokenState({
+      token: 'ghp_abcdefghijklmnop',
+      isValidated: true,
+      scopes: ['repo', 'delete_repo', 'admin:org'],
+    });
+    render(<SettingsPage />);
+
+    expect(screen.getByText(/more access than the dashboard needs/i)).toBeInTheDocument();
+    expect(screen.getByText(/delete_repo, admin:org/)).toBeInTheDocument();
+  });
+
+  it('renders the repository selector only for a validated token', () => {
+    render(<SettingsPage />);
+    expect(screen.queryByTestId('repository-selection')).not.toBeInTheDocument();
+
+    resetTokenState({ token: 'ghp_abcdefghijklmnop', isValidated: true });
+    render(<SettingsPage />);
+    expect(screen.getByTestId('repository-selection')).toBeInTheDocument();
+  });
+
+  it('explains when encrypted persistence is unavailable', () => {
+    resetTokenState({ isSecureStorageSupported: false });
+    render(<SettingsPage />);
+
+    expect(screen.getByText(/Secure storage not supported/i)).toBeInTheDocument();
+    expect(screen.getByText(/only persist for this session/i)).toBeInTheDocument();
+  });
+
+  it('shows the alert rules', () => {
+    render(<SettingsPage />);
+
+    expect(screen.getByText('Alerts')).toBeInTheDocument();
+    expect(screen.getByLabelText('Enable browser notifications')).toBeInTheDocument();
+    expect(screen.getByLabelText('Queue warning (minutes)')).toHaveValue(30);
+    expect(screen.getByLabelText('Runtime warning (minutes)')).toHaveValue(90);
+  });
+
+  it('shows the security and privacy model', () => {
+    render(<SettingsPage />);
+
+    expect(screen.getByText('Security & Privacy')).toBeInTheDocument();
+    expect(screen.getByText(/no backend ever receives your token/i)).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: /security audit/i })).toHaveAttribute(
+      'href',
+      expect.stringContaining('SECURITY-AUDIT.md')
+    );
   });
 });
-
-console.log('✅ Settings Page UI tests completed successfully!');
-console.log('🎯 All components render correctly and handle user interactions properly.');
-console.log('📱 Token management interface is functional and user-friendly.');

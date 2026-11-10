@@ -1,0 +1,15 @@
+# Trivy ignore list
+#
+# These advisories are reported inside the dependency copies that Next.js
+# vendors in its compiled runtime (`next/dist/compiled`, edge-runtime bundle).
+# They cannot be patched independently of Next.js. Next 16.4.6 is the latest
+# release; re-check after the next Next.js upgrade and remove the ignores.
+#
+# - brace-expansion: build-time minimatch dependency, not reachable at runtime
+# - undici: vendored fetch implementation in the edge runtime bundle
+CVE-2026-102276 exp:2027-02-01
+CVE-2026-102278 exp:2027-02-01
+CVE-2026-109383 exp:2027-02-01
+CVE-2026-109869 exp:2027-02-01
+CVE-2026-19534 exp:2027-02-01
+CVE-2026-87018 exp:2027-02-01

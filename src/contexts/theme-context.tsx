@@ -29,20 +29,28 @@ export function ThemeProvider({ children }: ThemeProviderProps) {
 
   // Load theme from localStorage on mount
   useEffect(() => {
-    const savedTheme = localStorage.getItem('github-flow-dashboard-theme') as Theme;
-    if (savedTheme) {
-      setThemeState(savedTheme);
-    } else {
-      // Check system preference
-      const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-      setThemeState(prefersDark ? 'dark' : 'light');
+    try {
+      const savedTheme = localStorage.getItem('github-flow-dashboard-theme');
+      if (savedTheme === 'light' || savedTheme === 'dark') {
+        setThemeState(savedTheme);
+        return;
+      }
+    } catch {
+      // Fall through to system preference.
     }
+    // Check system preference
+    const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+    setThemeState(prefersDark ? 'dark' : 'light');
   }, []);
 
   // Apply theme to document and save to localStorage
   const setTheme = (newTheme: Theme) => {
     setThemeState(newTheme);
-    localStorage.setItem('github-flow-dashboard-theme', newTheme);
+    try {
+      localStorage.setItem('github-flow-dashboard-theme', newTheme);
+    } catch {
+      // Theme still applies for this session.
+    }
     
     // Apply theme class to document
     if (newTheme === 'dark') {

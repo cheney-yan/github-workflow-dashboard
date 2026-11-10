@@ -4,8 +4,8 @@
  */
 'use client';
 
-import React, { createContext, useContext, useState, useEffect, ReactNode, useCallback, useMemo } from 'react';
-import { setSecureItem, getSecureItem, STORAGE_KEYS } from '@/lib/storage/secure-storage';
+import React, { createContext, useContext, useState, useEffect, useRef, ReactNode, useCallback, useMemo } from 'react';
+import { setSecureItem, getSecureItem, removeSecureItem, STORAGE_KEYS } from '@/lib/storage/secure-storage';
 import { GitHubApiClient } from '@/lib/api/github';
 import { Repository } from '@/lib/api/types';
 import { useGitHubToken } from './github-token-context';
@@ -64,6 +64,19 @@ export function RepositorySelectionProvider({ children }: RepositorySelectionPro
   const [error, setError] = useState<string | null>(null);
   const [loadingStatus, setLoadingStatus] = useState<string | null>(null);
   const [nameFilter, setNameFilterState] = useState<string>('');
+  const storageLoadedRef = useRef(false);
+  const previousUserIdRef = useRef<string | null>(null);
+
+  // Clear a previous user's repository selection when the authenticated
+  // identity changes or the token is removed.
+  useEffect(() => {
+    const previous = previousUserIdRef.current;
+    if (previous && previous !== (userId ?? null)) {
+      setSelectedRepositoriesState([]);
+      removeSecureItem(STORAGE_KEYS.SELECTED_REPOSITORIES);
+    }
+    previousUserIdRef.current = userId ?? null;
+  }, [userId]);
 
   // Load selected repositories and last organization from storage on mount
   useEffect(() => {
@@ -72,17 +85,34 @@ export function RepositorySelectionProvider({ children }: RepositorySelectionPro
         // Load selected repositories
         const stored = await getSecureItem(STORAGE_KEYS.SELECTED_REPOSITORIES);
         if (stored) {
-          const repositories = JSON.parse(stored) as Repository[];
-          // Convert Repository[] to RepositoryWithWorkflowStatus[] for selected repos
-          const repositoriesWithStatus = repositories.map(repo => ({
-            ...repo,
-            workflowStatus: 'unknown' as WorkflowStatus // Will be updated when workflows are checked
-          }));
-          setSelectedRepositoriesState(repositoriesWithStatus);
+          const parsed = JSON.parse(stored);
+          if (Array.isArray(parsed)) {
+            const repositories = parsed.filter(
+              (repo): repo is Repository =>
+                Boolean(repo) &&
+                typeof repo.id === 'number' &&
+                typeof repo.name === 'string' &&
+                typeof repo.full_name === 'string' &&
+                typeof repo.html_url === 'string' &&
+                Boolean(repo.owner) &&
+                typeof repo.owner.login === 'string' &&
+                repo.full_name.split('/').length === 2
+            );
+            const repositoriesWithStatus = repositories.map(repo => ({
+              ...repo,
+              workflowStatus: 'unknown' as WorkflowStatus // Will be updated when workflows are checked
+            }));
+            setSelectedRepositoriesState(repositoriesWithStatus);
+          }
         }
         
         // Load last selected organization
-        const lastOrg = localStorage.getItem('github-flow-dashboard-last-org');
+        let lastOrg: string | null = null;
+        try {
+          lastOrg = localStorage.getItem('github-flow-dashboard-last-org');
+        } catch {
+          lastOrg = null;
+        }
         if (lastOrg && lastOrg !== 'null') {
           setSelectedOrganizationState(lastOrg);
         } else if (userId) {
@@ -91,6 +121,8 @@ export function RepositorySelectionProvider({ children }: RepositorySelectionPro
         }
       } catch (err) {
         console.error('Failed to load stored data:', err);
+      } finally {
+        storageLoadedRef.current = true;
       }
     }
 
@@ -100,10 +132,14 @@ export function RepositorySelectionProvider({ children }: RepositorySelectionPro
 
   // Persist selected repositories to storage whenever they change
   useEffect(() => {
+    if (!storageLoadedRef.current) return;
+
     async function saveSelectedRepositories() {
       try {
         if (selectedRepositories.length > 0) {
           await setSecureItem(STORAGE_KEYS.SELECTED_REPOSITORIES, JSON.stringify(selectedRepositories));
+        } else {
+          removeSecureItem(STORAGE_KEYS.SELECTED_REPOSITORIES);
         }
       } catch (err) {
         console.error('Failed to save selected repositories:', err);
@@ -207,8 +243,9 @@ export function RepositorySelectionProvider({ children }: RepositorySelectionPro
       const allRepositories: Repository[] = [];
       let page = 1;
       const perPage = 100;
+      const maxPages = 20; // hard stop: 2,000 repositories per owner
 
-      while (true) {
+      while (page <= maxPages) {
         setLoadingStatus(`Fetching page ${page}...`);
         const isUser = organizations.find(org => org.login === targetOwner)?.type === 'User';
         const pageRepositories = await apiClient.getRepositories(targetOwner, isUser, {
@@ -335,11 +372,15 @@ export function RepositorySelectionProvider({ children }: RepositorySelectionPro
     setLoadingStatus(null);
     setError(null);
     
-    // Save to localStorage
-    if (org) {
-      localStorage.setItem('github-flow-dashboard-last-org', org);
-    } else {
-      localStorage.removeItem('github-flow-dashboard-last-org');
+    // Save to localStorage (non-sensitive UI preference)
+    try {
+      if (org) {
+        localStorage.setItem('github-flow-dashboard-last-org', org);
+      } else {
+        localStorage.removeItem('github-flow-dashboard-last-org');
+      }
+    } catch {
+      // Storage can be blocked in private mode; the selection still applies.
     }
     
     // Fetch repositories for the new organization
